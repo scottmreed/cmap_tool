@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from datetime import datetime
+import uuid
 
 import math
 import networkx as nx
@@ -212,7 +214,7 @@ class ConceptMapBuilder:
     def compute_layout(
         self,
         concepts: Sequence[Dict[str, str]],
-        edges: Sequence[Tuple[str, str]],
+        edges: Sequence[Dict[str, str]],
         *,
         seed: int = 7,
     ) -> Dict[str, NodeLayout]:
@@ -228,7 +230,13 @@ class ConceptMapBuilder:
 
         graph = nx.Graph()
         graph.add_nodes_from(nodes.keys())
-        for src, dst in edges:
+        for edge in edges:
+            # Handle both dict format (new) and tuple format (legacy)
+            if isinstance(edge, dict):
+                src = edge.get("source")
+                dst = edge.get("target")
+            else:
+                src, dst = edge
             if src in nodes and dst in nodes:
                 graph.add_edge(src, dst)
 
@@ -351,7 +359,7 @@ class ConceptMapBuilder:
     def build_presentation(
         self,
         concepts: Sequence[Dict[str, str]],
-        edges: Sequence[Tuple[str, str]],
+        edges: Sequence[Dict[str, str]],
         layout: Optional[Dict[str, NodeLayout]] = None,
     ) -> Presentation:
         if layout is None:
@@ -383,7 +391,16 @@ class ConceptMapBuilder:
             run.font.color.rgb = RGBColor(*self.text_rgb)
             slide_shapes[node.node_id] = shape
 
-        for src, dst in edges:
+        for edge in edges:
+            # Handle both dict format (new) and tuple format (legacy)
+            if isinstance(edge, dict):
+                src = edge.get("source")
+                dst = edge.get("target")
+                edge_label = edge.get("label", "")
+            else:
+                src, dst = edge
+                edge_label = ""
+            
             if src not in slide_shapes or dst not in slide_shapes:
                 continue
             sa = slide_shapes[src]
@@ -404,13 +421,48 @@ class ConceptMapBuilder:
             ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
             head_end = etree.SubElement(ln, f"{{{ns}}}headEnd")
             head_end.set("type", "triangle")
+            
+            # Add label text box if edge has a label
+            if edge_label and edge_label.strip():
+                mid_x = (ax + bx) / 2
+                mid_y = (ay + by) / 2
+                label_text = edge_label.strip()
+                lines, font_pt, w_emu, h_emu = measure_box_for_text(
+                    label_text,
+                    font_max_pt=8,
+                    font_min_pt=6,
+                    target_width_in=1.5,
+                    min_width_in=0.5,
+                    max_width_in=2.0,
+                    max_lines=2,
+                )
+                label_x = int(mid_x - w_emu / 2)
+                label_y = int(mid_y - h_emu / 2)
+                label_shape = slide.shapes.add_shape(
+                    MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE,
+                    label_x, label_y, w_emu, h_emu
+                )
+                label_shape.fill.solid()
+                label_shape.fill.fore_color.rgb = RGBColor(255, 255, 255)
+                label_shape.line.color.rgb = RGBColor(*self.concept_line)
+                label_shape.line.width = Emu(635)
+                label_frame = label_shape.text_frame
+                label_frame.clear()
+                label_frame.word_wrap = True
+                label_frame.auto_size = MSO_AUTO_SIZE.NONE
+                label_para = label_frame.paragraphs[0]
+                label_run = label_para.add_run()
+                label_run.text = "\n".join(lines)
+                label_run.font.name = "Calibri"
+                label_run.font.size = Pt(font_pt)
+                label_run.font.color.rgb = RGBColor(*self.text_rgb)
 
         return prs
 
     def build_pptx_bytes(
         self,
         concepts: Sequence[Dict[str, str]],
-        edges: Sequence[Tuple[str, str]],
+        edges: Sequence[Dict[str, str]],
         layout: Optional[Dict[str, NodeLayout]] = None,
     ) -> BytesIO:
         prs = self.build_presentation(concepts, edges, layout=layout)
@@ -422,9 +474,10 @@ class ConceptMapBuilder:
     def render_preview(
         self,
         layout: Dict[str, NodeLayout],
-        edges: Sequence[Tuple[str, str]],
+        edges: Sequence[Dict[str, str]],
         *,
         figsize: Tuple[float, float] = (8, 4.8),
+        show_edge_labels: bool = True,
     ) -> BytesIO:
         if not layout:
             raise ValueError("Cannot render preview without nodes.")
@@ -435,17 +488,45 @@ class ConceptMapBuilder:
         ax.set_ylim(height_in, 0)  # invert Y to match PPT coordinates
         ax.axis("off")
 
-        for src, dst in edges:
+        for edge in edges:
+            # Handle both dict format (new) and tuple format (legacy)
+            if isinstance(edge, dict):
+                src = edge.get("source")
+                dst = edge.get("target")
+                edge_label = edge.get("label", "")
+            else:
+                src, dst = edge
+                edge_label = ""
+            
             if src not in layout or dst not in layout:
                 continue
             sx, sy = layout[src].center_in
             dx, dy = layout[dst].center_in
+            
+            # Draw arrow
+            mid_x = (sx + dx) / 2
+            mid_y = (sy + dy) / 2
+            
             ax.annotate(
                 "",
                 xy=(dx, dy),
                 xytext=(sx, sy),
                 arrowprops=dict(arrowstyle="->", color="#7a7a7a", linewidth=1.8),
             )
+            
+            # Add label if present and labels are enabled
+            if show_edge_labels and edge_label and edge_label.strip():
+                ax.text(
+                    mid_x, mid_y,
+                    edge_label.strip(),
+                    ha="center",
+                    va="center",
+                    fontsize=7,
+                    color="#323232",
+                    fontname="Calibri",
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="#787878", linewidth=0.8),
+                    zorder=10
+                )
 
         for node in layout.values():
             cx, cy = node.center_in
@@ -475,6 +556,316 @@ class ConceptMapBuilder:
         buffer = BytesIO()
         fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
         plt.close(fig)
+        buffer.seek(0)
+        return buffer
+
+    def render_jpg(
+        self,
+        layout: Dict[str, NodeLayout],
+        edges: Sequence[Dict[str, str]],
+        *,
+        figsize: Tuple[float, float] = (8, 4.8),
+        dpi: int = 300,
+    ) -> BytesIO:
+        """Render the concept map as a JPG image with high resolution."""
+        if not layout:
+            raise ValueError("Cannot render JPG without nodes.")
+
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi / 72.0)
+        width_in, height_in = self.slide_size
+        ax.set_xlim(0, width_in)
+        ax.set_ylim(height_in, 0)  # invert Y to match PPT coordinates
+        ax.axis("off")
+        ax.set_facecolor("white")
+
+        for edge in edges:
+            # Handle both dict format (new) and tuple format (legacy)
+            if isinstance(edge, dict):
+                src = edge.get("source")
+                dst = edge.get("target")
+                edge_label = edge.get("label", "")
+            else:
+                src, dst = edge
+                edge_label = ""
+            
+            if src not in layout or dst not in layout:
+                continue
+            sx, sy = layout[src].center_in
+            dx, dy = layout[dst].center_in
+            
+            # Draw arrow
+            mid_x = (sx + dx) / 2
+            mid_y = (sy + dy) / 2
+            
+            ax.annotate(
+                "",
+                xy=(dx, dy),
+                xytext=(sx, sy),
+                arrowprops=dict(arrowstyle="->", color="#7a7a7a", linewidth=2.0),
+            )
+            
+            # Add label if present
+            if edge_label and edge_label.strip():
+                ax.text(
+                    mid_x, mid_y,
+                    edge_label.strip(),
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color="#323232",
+                    fontname="Calibri",
+                    bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor="#787878", linewidth=1.0),
+                    zorder=10
+                )
+
+        for node in layout.values():
+            cx, cy = node.center_in
+            width = node.width_in
+            height = node.height_in
+            rect = patches.FancyBboxPatch(
+                (cx - width / 2, cy - height / 2),
+                width,
+                height,
+                boxstyle="round,pad=0.05",
+                linewidth=2.0,
+                edgecolor="#787878",
+                facecolor="#f5f5f5",
+            )
+            ax.add_patch(rect)
+            ax.text(
+                cx,
+                cy,
+                "\n".join(node.lines),
+                ha="center",
+                va="center",
+                fontsize=max(8, node.font_pt + 1),
+                color="#323232",
+                fontname="Calibri",
+            )
+
+        buffer = BytesIO()
+        fig.savefig(buffer, format="jpeg", dpi=dpi, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        buffer.seek(0)
+        return buffer
+
+    def build_cxl_xml(
+        self,
+        concepts: Sequence[Dict[str, str]],
+        edges: Sequence[Dict[str, str]],
+        layout: Optional[Dict[str, NodeLayout]] = None,
+        title: str = "Concept Map",
+    ) -> BytesIO:
+        """Build a CXL (Concept Mapping Extensible Language) XML file from the concept map data."""
+        if layout is None:
+            layout = self.compute_layout(concepts, edges)
+        
+        # Namespaces
+        CMAP_NS = "http://cmap.ihmc.us/xml/cmap/"
+        DC_NS = "http://purl.org/dc/elements/1.1/"
+        DCTERMS_NS = "http://purl.org/dc/terms/"
+        VCARD_NS = "http://www.w3.org/2001/vcard-rdf/3.0#"
+        
+        # Create root element
+        root = etree.Element(
+            "{" + CMAP_NS + "}cmap",
+            nsmap={
+                None: CMAP_NS,
+                "dc": DC_NS,
+                "dcterms": DCTERMS_NS,
+                "vcard": VCARD_NS,
+            }
+        )
+        
+        # Resource metadata
+        res_meta = etree.SubElement(root, "{" + CMAP_NS + "}res-meta")
+        etree.SubElement(res_meta, "{" + DC_NS + "}title").text = title
+        etree.SubElement(res_meta, "{" + DC_NS + "}description")
+        etree.SubElement(res_meta, "{" + DC_NS + "}format").text = "x-cmap/x-storable"
+        etree.SubElement(res_meta, "{" + DC_NS + "}type")
+        
+        # Creator/contributor (minimal)
+        creator = etree.SubElement(res_meta, "{" + DC_NS + "}creator")
+        etree.SubElement(creator, "{" + VCARD_NS + "}FN").text = "Concept Map Builder"
+        
+        contributor = etree.SubElement(res_meta, "{" + DC_NS + "}contributor")
+        etree.SubElement(contributor, "{" + VCARD_NS + "}FN").text = "Concept Map Builder"
+        
+        etree.SubElement(res_meta, "{" + DC_NS + "}language").text = "en"
+        etree.SubElement(res_meta, "{" + DC_NS + "}publisher").text = "Concept Map Builder Tool"
+        
+        now = datetime.now().isoformat()
+        etree.SubElement(res_meta, "{" + DCTERMS_NS + "}modified").text = now
+        etree.SubElement(res_meta, "{" + DCTERMS_NS + "}created").text = now
+        
+        # Calculate map dimensions
+        if layout:
+            # Find bounding box
+            x_coords = []
+            y_coords = []
+            for node in layout.values():
+                x, y = node.center_emu
+                w, h = node.size_emu
+                x_coords.extend([x - w//2, x + w//2])
+                y_coords.extend([y - h//2, y + h//2])
+            if x_coords and y_coords:
+                map_width = max(x_coords) - min(x_coords) + 200  # padding
+                map_height = max(y_coords) - min(y_coords) + 200
+            else:
+                map_width = 2200
+                map_height = 1013
+        else:
+            map_width = 2200
+            map_height = 1013
+        
+        # Map element
+        map_elem = etree.SubElement(root, "{" + CMAP_NS + "}map")
+        map_elem.set("width", str(int(map_width)))
+        map_elem.set("height", str(int(map_height)))
+        
+        # Concept list
+        concept_list = etree.SubElement(map_elem, "{" + CMAP_NS + "}concept-list")
+        concept_id_map = {}  # Map original IDs to generated IDs
+        base_timestamp = int(datetime.now().timestamp() * 1000)
+        for idx, concept in enumerate(concepts):
+            # Generate a unique ID similar to CmapTools format
+            concept_id = f"{base_timestamp + idx * 100}{idx}-{uuid.uuid4().hex[:8]}"
+            concept_id_map[concept["id"]] = concept_id
+            concept_elem = etree.SubElement(concept_list, "{" + CMAP_NS + "}concept")
+            concept_elem.set("id", concept_id)
+            concept_elem.set("label", concept["label"])
+        
+        # Linking phrase list (edge labels)
+        linking_phrase_list = etree.SubElement(map_elem, "{" + CMAP_NS + "}linking-phrase-list")
+        linking_phrase_map = {}  # Map edge to linking phrase ID
+        
+        for idx, edge in enumerate(edges):
+            if isinstance(edge, dict):
+                edge_label = edge.get("label", "").strip()
+            else:
+                edge_label = ""
+            
+            if edge_label:
+                linking_phrase_id = f"{base_timestamp + (idx + 1000) * 100}{idx}-{uuid.uuid4().hex[:8]}"
+                linking_phrase_map[idx] = linking_phrase_id
+                linking_phrase_elem = etree.SubElement(
+                    linking_phrase_list, "{" + CMAP_NS + "}linking-phrase"
+                )
+                linking_phrase_elem.set("id", linking_phrase_id)
+                linking_phrase_elem.set("label", edge_label)
+        
+        # Connection list
+        connection_list = etree.SubElement(map_elem, "{" + CMAP_NS + "}connection-list")
+        
+        for idx, edge in enumerate(edges):
+            if isinstance(edge, dict):
+                src_id = concept_id_map.get(edge.get("source"))
+                dst_id = concept_id_map.get(edge.get("target"))
+                edge_label = edge.get("label", "").strip()
+            else:
+                continue  # Skip legacy format
+            
+            if not src_id or not dst_id:
+                continue
+            
+            if edge_label and idx in linking_phrase_map:
+                # Connection uses a linking phrase - create two connections
+                linking_phrase_id = linking_phrase_map[idx]
+                
+                # Connection from source concept to linking phrase
+                conn1_id = f"{base_timestamp + (idx + 2000) * 100}{idx}-{uuid.uuid4().hex[:8]}"
+                conn1_elem = etree.SubElement(connection_list, "{" + CMAP_NS + "}connection")
+                conn1_elem.set("id", conn1_id)
+                conn1_elem.set("from-id", src_id)
+                conn1_elem.set("to-id", linking_phrase_id)
+                
+                # Connection from linking phrase to target concept
+                conn2_id = f"{base_timestamp + (idx + 3000) * 100}{idx}-{uuid.uuid4().hex[:8]}"
+                conn2_elem = etree.SubElement(connection_list, "{" + CMAP_NS + "}connection")
+                conn2_elem.set("id", conn2_id)
+                conn2_elem.set("from-id", linking_phrase_id)
+                conn2_elem.set("to-id", dst_id)
+            else:
+                # Direct connection without linking phrase
+                connection_id = f"{base_timestamp + (idx + 2000) * 100}{idx}-{uuid.uuid4().hex[:8]}"
+                connection_elem = etree.SubElement(connection_list, "{" + CMAP_NS + "}connection")
+                connection_elem.set("id", connection_id)
+                connection_elem.set("from-id", src_id)
+                connection_elem.set("to-id", dst_id)
+        
+        # Concept appearance list
+        if layout:
+            concept_appearance_list = etree.SubElement(
+                map_elem, "{" + CMAP_NS + "}concept-appearance-list"
+            )
+            for concept in concepts:
+                original_id = concept["id"]
+                concept_id = concept_id_map.get(original_id)
+                if concept_id and original_id in layout:
+                    node = layout[original_id]
+                    cx, cy = node.center_emu
+                    w, h = node.size_emu
+                    appearance = etree.SubElement(
+                        concept_appearance_list, "{" + CMAP_NS + "}concept-appearance"
+                    )
+                    appearance.set("id", concept_id)
+                    appearance.set("x", str(int(cx - w // 2)))
+                    appearance.set("y", str(int(cy - h // 2)))
+                    appearance.set("width", str(w))
+                    appearance.set("height", str(h))
+        
+        # Linking phrase appearance list (simplified - just placeholder)
+        linking_phrase_appearance_list = etree.SubElement(
+            map_elem, "{" + CMAP_NS + "}linking-phrase-appearance-list"
+        )
+        
+        # Connection appearance list (empty but required)
+        connection_appearance_list = etree.SubElement(
+            map_elem, "{" + CMAP_NS + "}connection-appearance-list"
+        )
+        
+        # Style sheet list
+        style_sheet_list = etree.SubElement(map_elem, "{" + CMAP_NS + "}style-sheet-list")
+        style_sheet = etree.SubElement(style_sheet_list, "{" + CMAP_NS + "}style-sheet")
+        style_sheet.set("id", "_Default_")
+        
+        map_style = etree.SubElement(style_sheet, "{" + CMAP_NS + "}map-style")
+        map_style.set("background-color", "232,234,236,255")
+        
+        concept_style = etree.SubElement(style_sheet, "{" + CMAP_NS + "}concept-style")
+        concept_style.set("font-name", "Verdana")
+        concept_style.set("font-size", "12")
+        concept_style.set("font-style", "bold")
+        concept_style.set("font-color", "50,50,50,255")
+        concept_style.set("background-color", "245,245,245,255")
+        concept_style.set("border-color", "120,120,120,255")
+        concept_style.set("border-thickness", "2")
+        
+        linking_phrase_style = etree.SubElement(
+            style_sheet, "{" + CMAP_NS + "}linking-phrase-style"
+        )
+        linking_phrase_style.set("font-name", "Verdana")
+        linking_phrase_style.set("font-size", "12")
+        linking_phrase_style.set("font-color", "0,0,0,255")
+        
+        connection_style = etree.SubElement(style_sheet, "{" + CMAP_NS + "}connection-style")
+        connection_style.set("color", "120,120,120,255")
+        connection_style.set("thickness", "2")
+        
+        # Cmap parts list
+        cmap_parts_list = etree.SubElement(root, "{" + CMAP_NS + "}cmap-parts-list")
+        annotations = etree.SubElement(cmap_parts_list, "{" + CMAP_NS + "}annotations")
+        etree.SubElement(annotations, "{" + CMAP_NS + "}annotation-list")
+        etree.SubElement(annotations, "{" + CMAP_NS + "}annotation-appearance-list")
+        
+        # Convert to bytes
+        xml_string = etree.tostring(
+            root,
+            encoding="UTF-8",
+            xml_declaration=True,
+            pretty_print=False,
+        )
+        buffer = BytesIO(xml_string)
         buffer.seek(0)
         return buffer
 
