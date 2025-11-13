@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from datetime import datetime
 import uuid
 
@@ -648,6 +648,63 @@ class ConceptMapBuilder:
         plt.close(fig)
         buffer.seek(0)
         return buffer
+
+    def calculate_proposition_stats(
+        self,
+        concepts: Sequence[Dict[str, str]],
+        edges: Sequence[Dict[str, str]],
+    ) -> Dict[str, Any]:
+        """
+        Calculate proposition and orphan counts for assessment.
+        
+        A proposition is an edge with a label.
+        An orphan proposition is a proposition whose label ends with one or more '?' characters.
+        Orphan propositions are included in the orphan count and excluded from the proposition count.
+        
+        Returns:
+            Dict containing:
+                - total_propositions: total number of edges with labels
+                - orphan_count: number of propositions ending with '?'
+                - adjusted_proposition_count: total_propositions - orphan_count
+                - orphan_propositions: list of orphan proposition details
+        """
+        # Build concept label lookup
+        concept_labels = {c["id"]: c.get("label", "") for c in concepts}
+        
+        total_propositions = 0
+        orphan_count = 0
+        orphan_propositions = []
+        
+        for edge in edges:
+            # Handle both dict format (new) and tuple format (legacy)
+            if isinstance(edge, dict):
+                edge_label = edge.get("label", "").strip()
+            else:
+                continue  # Skip legacy format without labels
+            
+            # Only count edges with labels as propositions
+            if edge_label:
+                total_propositions += 1
+                
+                # Check if label ends with one or more question marks
+                if edge_label.rstrip().endswith("?"):
+                    orphan_count += 1
+                    source_label = concept_labels.get(edge.get("source", ""), edge.get("source", ""))
+                    target_label = concept_labels.get(edge.get("target", ""), edge.get("target", ""))
+                    orphan_propositions.append({
+                        "source": source_label,
+                        "target": target_label,
+                        "label": edge_label
+                    })
+        
+        adjusted_proposition_count = total_propositions - orphan_count
+        
+        return {
+            "total_propositions": total_propositions,
+            "orphan_count": orphan_count,
+            "adjusted_proposition_count": adjusted_proposition_count,
+            "orphan_propositions": orphan_propositions,
+        }
 
     def build_cxl_xml(
         self,
